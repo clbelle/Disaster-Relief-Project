@@ -1,0 +1,652 @@
+---
+title: "Project-2_12"
+author: "Ampoyo, Rheyan (xcs5hg)
+Belle, Camisha L. (fbv2ub) 
+Cuevas Rodriguez, Dalila (zfd9aj) 
+Tran, Karmen Victoria (aqq2ex)
+"
+date: "2025-04-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+#| warning: FALSE
+#| message: FALSE
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE, autodep=TRUE)
+knitr::opts_chunk$set(fig.align="center", fig.pos="tbh")
+
+library(tidyverse)
+library(tidymodels)
+library(discrim)
+library(yardstick)
+library(caret)
+library(cowplot)
+library(ROCR)
+library(GGally)
+library(doParallel)
+library(kableExtra)
+library(plotly)
+library(MASS)
+library(patchwork)
+library(probably)
+library(partykit) 
+library(ggparty)
+library(bonsai)
+library(lightgbm)
+library(patchwork)
+library(vip)
+library(stopwords)
+library(textrecipes)
+library(kernlab)
+library(mgcv)
+```
+
+# Setup parallel processing
+We start a cluster for faster calculations. 
+```{r, include=FALSE}
+#| cache: FALSE
+#| message: false
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+
+## Load/Prep Training data/Holdout Data
+
+## Load/Prep data
+```{r}
+set.seed(123)
+#| message: false
+train_data <- read.csv('https://gedeck.github.io/DS-6030/project/HaitiPixels.csv', sep = ",", header = TRUE)
+train_data$Blue_Tarp <- ifelse(train_data$Class == "Blue Tarp", "Yes", "No")
+train_data$Blue_Tarp <- factor(train_data$Blue_Tarp, levels = c("No", "Yes"))
+train_data$Class <- factor(train_data$Class)
+```
+
+## Load Holdout Dataset
+
+```{r}
+Data_057_NonTarp <- read.csv("HoldOutData/orthovnir057_ROI_NON_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "")
+Data_067_Tarp2 <- read.csv("HoldOutData/orthovnir067_ROI_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") 
+Data_067_NonTarp <- read.csv("HoldOutData/orthovnir067_ROI_NOT_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") 
+Data_069_Tarp <- read.csv("HoldOutData/orthovnir069_ROI_Blue_Tarps.txt", 
+                         header = FALSE, skip = 8, sep = "") 
+Data_069_NonTarp <- read.csv("HoldOutData/orthovnir069_ROI_NOT_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "")
+Data_078_Tarp <- read.csv("HoldOutData/orthovnir078_ROI_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "")
+Data_078_NonTarp <- read.csv("HoldOutData/orthovnir078_ROI_NON_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "")
+```
+
+```{r}
+non_tarp_df <- rbind(Data_057_NonTarp, Data_067_NonTarp, Data_069_NonTarp, Data_078_NonTarp) %>%
+  mutate(color = rgb(V8/255, V9/255, V10/255),
+         Class = 'Not_Blue_Tarp')
+
+tarp_df <- rbind(Data_067_Tarp2, Data_069_Tarp, Data_078_Tarp) %>%
+  mutate(color = rgb(V8/255, V9/255, V10/255),
+         Class = 'Blue_Tarp')
+
+holdout_df <- rbind(non_tarp_df, tarp_df) %>%
+  mutate(Class = factor(Class, levels = c("Not_Blue_Tarp", "Blue_Tarp")))
+
+```
+
+#### Exploratory Data Analysis
+
+```{r}
+train_data %>%
+  pivot_longer(cols = -c(Class, Blue_Tarp), names_to = "Feature", values_to = "Value") %>%
+  mutate(Feature = factor(Feature, levels = c("Red", "Green", "Blue"))) %>% 
+  ggplot(aes(x = Value, fill = Class)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~ Feature, scales = "free") +
+  scale_fill_manual(values = c("Blue Tarp" = "blue", "Rooftop" = "grey", "Soil" = "brown", "Various Non-Tarp" = "orange", "Vegetation" = "green")) +  # Custom colors
+  theme_minimal() +
+  labs(title = "Density Plots of Features by Class (Training Dataset)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+train_data %>%
+  pivot_longer(cols = -c(Class, Blue_Tarp), names_to = "Feature", values_to = "Value") %>%
+  mutate(Feature = factor(Feature, levels = c("Red", "Green", "Blue"))) %>% 
+  ggplot(aes(x = Value, fill = Blue_Tarp)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ Feature, scales = "free") +
+  scale_fill_manual(values = c("Yes" = "blue", "No" = "black")) +
+  theme_minimal() +
+  labs(title = "Density Plots of Features by Blue Tarp (Training Dataset)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#| warning: FALSE
+#| message: FALSE
+# Create a 3D scatter plot
+plot_ly(data = train_data, 
+        x = ~Red, 
+        y = ~Green, 
+        z = ~Blue, 
+        color = ~Blue_Tarp, 
+        colors = c("No" = "black", "Yes" = "blue"),
+        type = "scatter3d",
+        marker = list(size = 2, opacity = 0.25)) %>%
+  layout(
+    title = "3D Scatter Plot of RGB Values by Blue Tarp (Training Dataset)",
+    scene = list(
+      xaxis = list(title = "Red"),
+      yaxis = list(title = "Green"),
+      zaxis = list(title = "Blue")
+    ),
+    annotations = list(
+      list(
+        x = 0.5, y = -0.15,  
+        text = "Note: Training dataset.",
+        showarrow = FALSE, 
+        xref = "paper", yref = "paper", 
+        font = list(size = 12, color = "black")
+      )
+    ),
+    legend = list(
+      itemsizing = "constant",  # Ensures the symbol size is independent of font size
+      font = list(size = 12),   # Keep font size normal
+      tracegroupgap = 10
+  )
+)
+
+```
+
+## Verifying which columns correspond to which color
+
+Group 12 explored all possible RGB combinations using an RGB calculator, we determined that interpreting column 8 as Red, column 9 as Green, and column 10 as Blue produced scatterplots with colors that closely matched the provided example images. Any other combination resulted in unnatural hues of green, purple, or turquoise, indicating an incorrect mapping of the color channels.
+
+It is important to note that the position of the figures in the plot was not a factor in our analysis; this approach was solely used to verify the correct order of the RGB channels.
+
+```{r}
+
+rgb_test <- rbind(Data_067_Tarp2, Data_069_Tarp, Data_078_Tarp, Data_057_NonTarp, Data_067_NonTarp,Data_069_NonTarp, Data_078_NonTarp) %>%
+  mutate(color = rgb(V10/255,V9/255,V8/255),
+         Class = 'Not_Blue_Tarp')
+rgb_test$Class <- as.factor(rgb_test$Class)
+
+# plot displaying inaccurate color mapping
+ggplot(rgb_test, aes(x = V2, y = V3, color = color)) +
+  geom_point(size = .1) +
+  scale_color_identity(guide = 'none') +
+    labs(title = "Color-coded Scatter Plot: Displays Inaccurate Mapping of V10, V9, V8 to R, G, B") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# plot validating the mapping of V8, V9, and V10 to R,G,B.
+ggplot(holdout_df, aes(x = V2, y = V3, color = color)) +
+  geom_point(size = .1) +
+  scale_color_identity(guide = 'none') +
+  labs(title = "Color-coded Scatter Plot: Validates Mapping of V8, V9, V10 to R, G, B") +
+  theme_minimal()
+```
+
+### Training Set Analysis
+
+## Load/Prep data
+```{r}
+#| message: false
+train_data_analysis <- read.csv('https://gedeck.github.io/DS-6030/project/HaitiPixels.csv', header = TRUE)
+
+train_data_analysis <- train_data_analysis %>%
+  mutate(Class = as.factor(Class))
+
+form <- formula(Class~., train_data_analysis, family = 'binomial') #Just to get formula
+```
+
+#### Results 
+
+```{r}
+library(MASS)
+
+# Train QDA model with regularization (tol parameter)
+qda_fit <- qda(Blue_Tarp ~ Red + Green + Blue, data = train_data, tol = 1e-4)
+
+# Create a grid of values over the feature space
+x_range <- seq(min(train_data$Red), max(train_data$Red), length.out = 50)
+y_range <- seq(min(train_data$Green), max(train_data$Green), length.out = 50)
+z_range <- seq(min(train_data$Blue), max(train_data$Blue), length.out = 50)
+
+grid <- expand.grid(Red = x_range, Green = y_range, Blue = z_range)
+
+# Predict class probabilities for the grid points
+qda_pred <- predict(qda_fit, newdata = grid)
+grid$Blue_Tarp_Prob <- qda_pred$posterior[, "Yes"]
+
+# Filter points close to decision threshold (e.g., 0.5)
+boundary_points <- grid[abs(grid$Blue_Tarp_Prob - 0.7) < 0.05, ]
+
+# 3D scatter plot of training data with decision boundary
+# 3D scatter plot of training data with decision boundary
+plot_ly() %>%
+  add_trace(data = train_data %>% filter(Blue_Tarp == "Yes"), 
+            x = ~Red, y = ~Green, z = ~Blue, 
+            type = "scatter3d", mode = "markers", 
+            marker = list(size = 2, opacity = 0.25, color = "blue"),
+            name = "Blue Tarp") %>% 
+  add_trace(data = train_data %>% filter(Blue_Tarp == "No"), 
+            x = ~Red, y = ~Green, z = ~Blue, 
+            type = "scatter3d", mode = "markers", 
+            marker = list(size = 2, opacity = 0.25, color = "black"),
+            name = "Not Blue Tarp") %>%  # Label for "Not Blue Tarp"
+  add_trace(data = boundary_points, 
+            x = ~Red, y = ~Green, z = ~Blue, 
+            type = "scatter3d", mode = "markers",
+            marker = list(size = 2, color = "orange", opacity = 0.25),
+            name = "Decision Boundary") %>%  # Label for decision boundary
+  layout(title = "3D Decision Boundary for QDA (Training Dataset)",
+         scene = list(xaxis = list(title = "Red"),
+                      yaxis = list(title = "Green"),
+                      zaxis = list(title = "Blue")),
+         legend = list(
+           itemsizing = "constant",  # Ensures legend symbol size is independent of font
+           font = list(size = 10),   # Keep font size normal
+           tracegroupgap = 5
+         ))
+```
+
+#### Define Datasets
+```{r}
+#| warning: FALSE
+#| message: FALSE
+
+train_data <- read.csv('https://gedeck.github.io/DS-6030/project/HaitiPixels.csv', sep = ",", header = TRUE)
+train_data$Class <- ifelse(train_data$Class == "Blue Tarp", "Blue_Tarp", "Not_Blue_Tarp")
+train_data$Class <- factor(train_data$Class)
+
+cv_control = control_resamples(save_pred = TRUE)
+resamples <- vfold_cv(train_data, v=10, strata = Class)
+
+cv_control_bayes <- control_bayes(
+  verbose_iter = TRUE, 
+  save_gp_scoring = TRUE,
+  save_pred = TRUE
+)
+
+
+cv_metrics <- metric_set(roc_auc, accuracy, sens, spec)
+
+Data_057_NonTarp <- read.csv("HoldOutData/orthovnir057_ROI_NON_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(Class = 'Not_Blue_Tarp')
+Data_067_Tarp2 <- read.csv("HoldOutData/orthovnir067_ROI_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(Class = 'Blue_Tarp')
+Data_067_NonTarp <- read.csv("HoldOutData/orthovnir067_ROI_NOT_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(Class = 'Not_Blue_Tarp')
+Data_069_Tarp <- read.csv("HoldOutData/orthovnir069_ROI_Blue_Tarps.txt", 
+                         header = FALSE, skip = 8, sep = "") %>%
+  mutate(Class = 'Blue_Tarp')
+Data_069_NonTarp <- read.csv("HoldOutData/orthovnir069_ROI_NOT_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(Class = 'Not_Blue_Tarp')
+Data_078_Tarp <- read.csv("HoldOutData/orthovnir078_ROI_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(Class = 'Blue_Tarp')
+Data_078_NonTarp <- read.csv("HoldOutData/orthovnir078_ROI_NON_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(Class = 'Not_Blue_Tarp')
+```
+
+```{r}
+#| warning: FALSE
+#| message: FALSE
+test_data <- rbind(Data_067_Tarp2, Data_069_Tarp, Data_078_Tarp, Data_057_NonTarp, Data_067_NonTarp,Data_069_NonTarp, Data_078_NonTarp) %>%
+  dplyr::select(c(V8,V9,V10,Class))
+test_data$Class <- as.factor(test_data$Class)
+
+colnames(test_data) <- c('Red','Green','Blue','Class')
+cv_metrics <- cv_metrics <- metric_set(roc_auc, accuracy, sens, spec)
+
+```
+
+### Workflow Function
+```{r}
+set.seed(1)
+
+wf <- function(model){
+  
+  rec <- recipe(Class ~ ., data = train_data) 
+  folds <- vfold_cv(train_data, strata = Class)
+  
+  model_wf <- workflow() %>%
+    add_recipe(rec) %>%
+    add_model(model)
+
+  return(model_wf)
+}
+
+
+cv_control = control_resamples(save_pred = TRUE)
+resamples <- vfold_cv(train_data, v=10, strata = Class)
+
+cv_control_bayes <- control_bayes(
+  verbose_iter = TRUE, 
+  save_gp_scoring = TRUE,
+  save_pred = TRUE
+)
+
+
+cv_metrics <- cv_metrics <- metric_set(roc_auc, accuracy, sens, spec)
+```
+
+#### All Models ####
+
+### Logistic Regression
+```{r}
+#| warning: FALSE
+#| message: FALSE
+logreg_model <- logistic_reg(engine="glm", mode="classification")
+
+logreg_wf <- wf(logreg_model)
+
+logreg_fit <- logreg_wf %>%
+  fit_resamples(resamples = resamples,
+                control = cv_control,
+                metrics = cv_metrics)
+
+logreg_pred <- logreg_fit %>%
+  collect_predictions()
+
+logreg_metrics <- logreg_fit %>%
+  collect_metrics() %>%
+  mutate(Model = 'Logistic Regression Model') 
+
+logreg_metrics_graph <- logreg_metrics %>%
+  dplyr::select(c(.metric,mean, Model))
+```
+
+### Linear Disciminant Analysis
+```{r}
+#| warning: FALSE
+#| message: FALSE
+linear_discrim_model <- discrim_linear(engine = "MASS", mode="classification")
+
+linear_discrim_wf <- wf(linear_discrim_model)
+
+linear_discrim_fit <- linear_discrim_wf %>%
+  fit_resamples(resamples,
+                control = cv_control, 
+                metrics = cv_metrics)
+
+linear_discrim_pred <- linear_discrim_fit %>%
+  collect_predictions()
+
+linear_discrim_metrics <- linear_discrim_fit %>%
+  collect_metrics() %>% 
+  mutate(Model = 'Linear Discriminant Model')
+
+linear_discrim_metrics_graph <- linear_discrim_metrics %>%
+  dplyr::select(c(.metric,mean, Model)) 
+```
+
+### Quadratic Disciminant Analysis
+```{r}
+#| warning: FALSE
+#| message: FALSE
+quad_discrim_model <- discrim_quad(engine = "MASS", mode="classification")
+
+quad_discrim_wf <- wf(quad_discrim_model)
+
+quad_discrim_fit <- quad_discrim_wf %>%
+  fit_resamples(resamples,
+                control=cv_control,
+                metrics = cv_metrics)
+
+quad_discrim_pred <- quad_discrim_fit %>%
+  collect_predictions()
+
+quad_discrim_metrics <- quad_discrim_fit %>%
+  collect_metrics() %>% 
+  mutate(Model = 'Quadratic Discriminant Model')
+
+quad_discrim_metrics_graph <- quad_discrim_metrics %>%
+  dplyr::select(c(.metric,mean, Model))
+```
+
+### K Nearest Neighbors
+```{r}
+#| warning: FALSE
+#| message: FALSE
+knn_model <- nearest_neighbor(engine= "kknn", mode="classification", neighbors = tune())
+
+knn_wf <- wf(knn_model)
+
+parameters <- extract_parameter_set_dials(knn_wf) %>%
+  update(
+    neighbors = neighbors(range = c(0, 20))
+  )
+
+knn_tune_wf <- tune_bayes(knn_wf, 
+                      resamples=resamples, 
+                      metrics=cv_metrics,
+                      param_info=parameters, 
+                      control=cv_control_bayes,
+                      iter=10)
+
+best_knn_tune_wf <- knn_wf %>%
+    finalize_workflow(select_best(knn_tune_wf, metric = c("accuracy", "sensitivity", "specificity", "roc_auc")))
+
+knn_pred <- knn_tune_wf %>% 
+  collect_predictions()
+
+knn_metrics <- knn_tune_wf %>% 
+  collect_metrics() %>% 
+  filter(.config == select_best(knn_tune_wf, metric = "roc_auc")$.config) %>% 
+  mutate(Model = 'K Nearest Neighbor Model')
+
+knn_metrics_graph <- knn_metrics %>%
+  dplyr::select(c(.metric,mean, Model))
+```
+
+### Elastic Net Logistic Regression
+```{r}
+#| warning: FALSE
+#| message: FALSE
+elastic_net_model <- logistic_reg(engine="glmnet", mode="classification", mixture = tune(), penalty = tune())
+
+elastic_net_wf <- wf(elastic_net_model)
+
+parameters <- extract_parameter_set_dials(elastic_net_wf) %>%
+  update(mixture = mixture(range = c(0,1)))
+
+elastic_net_tune_wf <- tune_bayes(elastic_net_wf, 
+                      resamples=resamples, 
+                      metrics=cv_metrics,
+                      param_info=parameters,
+                      control = cv_control_bayes,
+                      iter=10)
+
+best_elastic_net_tune_wf <- elastic_net_wf %>%
+    finalize_workflow(select_best(elastic_net_tune_wf,  metric = c("accuracy", "sensitivity", "specificity", "roc_auc")))
+
+elastic_net_pred <- elastic_net_tune_wf  %>%
+  collect_predictions()
+
+elastic_net_pred_adjusted <- elastic_net_pred %>%
+  mutate(
+    .pred_class = if_else(.pred_Blue_Tarp >= 0.7, "Blue_Tarp", "Not_Blue_Tarp")
+  )
+
+elastic_net_metrics <- elastic_net_tune_wf %>% 
+  collect_metrics() %>% 
+  filter(.config == select_best(elastic_net_tune_wf, metric = "roc_auc")$.config) %>% 
+  mutate(Model = "Elastic Net Model") 
+
+elastic_net_metrics_graph <- elastic_net_metrics %>%
+  dplyr::select(c(.metric,mean, Model))
+``` 
+
+### Random Forest
+```{r}
+#| warning: FALSE
+#| message: FALSE
+random_forest_model <- rand_forest(mode="classification", min_n=tune(), mtry=tune(), trees = tune()) %>%
+  set_engine('ranger', importance="impurity")
+
+random_forest_wf <- wf(random_forest_model)
+
+parameters <- extract_parameter_set_dials(random_forest_wf) %>%
+    update(mtry = mtry(c(-10, 10)),
+           min_n = min_n(c(1,20)),
+           trees = trees(c(1,75)))
+
+random_forest_tune_wf <- tune_bayes(random_forest_wf, 
+                      resamples=resamples, 
+                      metrics=cv_metrics,
+                      param_info=parameters,
+                      control = cv_control_bayes,
+                      iter=10)
+
+best_random_forest_tune_wf <- random_forest_wf %>%
+    finalize_workflow(select_best(random_forest_tune_wf,  metric = c("accuracy", "sensitivity", "specificity", "roc_auc")))
+
+random_forest_pred <- random_forest_tune_wf %>% 
+  collect_predictions()
+
+random_forest_pred_adjusted <- random_forest_pred %>%
+  mutate(
+    .pred_class = if_else(.pred_Blue_Tarp >= 0.7, "Blue_Tarp", "Not_Blue_Tarp")
+  )
+
+random_forest_metrics <- random_forest_tune_wf %>% 
+  collect_metrics() %>% 
+  filter(.config == select_best(random_forest_tune_wf, metric = "roc_auc")$.config) %>% 
+  mutate(Model = 'Random Forest Model') 
+
+random_forest_metrics_graph <- random_forest_metrics %>%
+  dplyr::select(c(.metric,mean, Model))
+```
+
+### Support Vector Machine with Linear kernal
+```{r}
+#| warning: FALSE
+#| message: FALSE
+svm_linear_model <- svm_linear(engine = 'kernlab', mode = 'classification', cost = tune(), margin = tune())
+
+svm_linear_wf <- wf(svm_linear_model)
+
+parameters <- extract_parameter_set_dials(svm_linear_wf) %>%
+  update(
+    cost = cost(range = c(-2,5))
+  )
+
+svm_linear_tune_wf <- tune_bayes(svm_linear_wf, 
+                      resamples=resamples, 
+                      metrics=cv_metrics,
+                      param_info=parameters,
+                      control = cv_control_bayes,
+                      iter=10)
+
+best_svm_linear_tune_wf <- svm_linear_wf %>%
+    finalize_workflow(select_best(svm_linear_tune_wf,  metric = c("accuracy", "sensitivity", "specificity", "roc_auc")))
+
+svm_linear_pred <- svm_linear_tune_wf %>% 
+  collect_predictions()
+
+svm_linear_metrics <- svm_linear_tune_wf %>% 
+  collect_metrics() %>% 
+  filter(.config == select_best(svm_linear_tune_wf, metric = "roc_auc")$.config) %>% 
+  mutate(Model = 'SVM with Linear kernel') 
+
+svm_linear_metrics_graph <- svm_linear_metrics %>%
+  dplyr::select(c(.metric,mean, Model))
+
+```
+
+```{r}
+all_metrics_graph <- rbind(logreg_metrics_graph,
+                     linear_discrim_metrics_graph,
+                     quad_discrim_metrics_graph,
+                     knn_metrics_graph,
+                     elastic_net_metrics_graph,
+                     random_forest_metrics_graph,
+                     svm_linear_metrics_graph)
+
+
+sensitivity_metrics <- all_metrics_graph %>%
+  filter(.metric == 'sens')
+
+roc_auc_metrics <- all_metrics_graph %>%
+  filter(.metric == 'roc_auc')
+  
+ggplot(sensitivity_metrics, aes(x = Model, y = mean, fill = Model)) +
+  geom_bar(stat = 'identity') +
+  geom_text(aes(label = round(mean, 4)), vjust = -0.3, size = 3) +
+    labs(
+    title = "Comparison of Sensitivity Metrics by Model",
+    x = "Model",
+    y = "Mean Value from Cross Validation"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 8, angle = 45, hjust = 1))
+
+ggplot(roc_auc_metrics, aes(x = Model, y = mean, fill = Model)) +
+  geom_bar(stat = 'identity') +
+  geom_text(aes(label = round(mean, 4)), vjust = -0.3, size = 3) +
+  labs(
+    title = "Comparison of ROC AUC Metrics by Model",
+    x = "Model",
+    y = "Mean ROC AUC from Cross Validation"
+  ) +
+  coord_cartesian(ylim = c(0.97, 1)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+#| fig.width: 8
+#| fig.height: 4
+#| fig.cap: Overlay of cross-validation ROC curves
+roc_cv_data <- function(model_pred) {
+    model_pred %>%
+        roc_curve(truth=Class, .pred_Blue_Tarp, event_level="first")
+}
+bind_rows(
+    roc_cv_data(logreg_pred) %>% mutate(model="Logistic Regression Model"),
+    roc_cv_data(linear_discrim_pred) %>% mutate(model="Linear Discriminant Model"),
+    roc_cv_data(quad_discrim_pred) %>% mutate(model="Quadratic Dicriminant Model"),
+    roc_cv_data(knn_pred) %>% mutate(model="K Nearest Neighbor Model"),
+    roc_cv_data(elastic_net_pred) %>% mutate(model="Elastic Net Model"),
+    roc_cv_data(random_forest_pred) %>% mutate(model="Random Forest Model"),
+    roc_cv_data(svm_linear_pred) %>% mutate(model="SVM with radial basis function kernel")
+) %>%
+ggplot(aes(x=1 - specificity, y=sensitivity, color=model)) +
+    geom_line()
+```
+
+### Tune Results
+```{r}
+print(logreg_metrics)
+print(linear_discrim_metrics)
+print(quad_discrim_metrics)
+print(knn_metrics)
+print(elastic_net_metrics)
+print(random_forest_metrics)
+print(svm_linear_metrics)
+```
+
+
+```{r, include = FALSE}
+# Stop cluster
+stopCluster(cl)
+registerDoSEQ()
+```
