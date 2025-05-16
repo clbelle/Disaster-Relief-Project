@@ -1,0 +1,698 @@
+---
+title: "Project-1_12"
+author: "Ampoyo, Rheyan (xcs5hg)
+Belle, Camisha L. (fbv2ub) 
+Cuevas Rodriguez, Dalila (zfd9aj) 
+Tran, Karmen Victoria (aqq2ex)
+"
+date: "2025-03-03"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+library(tidyverse)
+library(tidymodels)
+library(discrim)
+library(yardstick)
+library(caret)
+library(cowplot)
+library(ROCR)
+library(GGally)
+library(parallel)
+library(doParallel)
+library(kableExtra)
+library(plotly)
+library(MASS)
+library(patchwork)
+```
+
+## Load/Prep Training data/Holdout Data
+
+## Load/Prep data
+```{r}
+set.seed(123)
+#| message: false
+train_data <- read.csv('https://gedeck.github.io/DS-6030/project/HaitiPixels.csv', sep = ",", header = TRUE)
+train_data$Blue_Tarp <- ifelse(train_data$Class == "Blue Tarp", "Yes", "No")
+train_data$Blue_Tarp <- factor(train_data$Blue_Tarp, levels = c("No", "Yes"))
+train_data$Class <- factor(train_data$Class)
+
+folds <- createFolds(train_data$Class, k = 10, list = TRUE, returnTrain = TRUE)
+
+control <- trainControl(method = "cv",
+                        number = 10,
+                        index = folds,
+                        savePredictions = TRUE,
+                        classProbs = TRUE)
+```
+
+## Load Holdout Dataset
+
+```{r}
+Data_057_NonTarp <- read.csv("HoldOutData/orthovnir057_ROI_NON_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(color = rgb(V8/255,V9/255,V10/255),
+         Class = 'Not_Blue_Tarp')
+Data_067_Tarp2 <- read.csv("HoldOutData/orthovnir067_ROI_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(color = rgb(V8/255,V9/255,V10/255),
+         Class = 'Blue_Tarp')
+Data_067_NonTarp <- read.csv("HoldOutData/orthovnir067_ROI_NOT_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(color = rgb(V8/255,V9/255,V10/255),
+         Class = 'Not_Blue_Tarp')
+Data_069_Tarp <- read.csv("HoldOutData/orthovnir069_ROI_Blue_Tarps.txt", 
+                         header = FALSE, skip = 8, sep = "") %>%
+  mutate(color = rgb(V8/255,V9/255,V10/255),
+         Class = 'Blue_Tarp')
+Data_069_NonTarp <- read.csv("HoldOutData/orthovnir069_ROI_NOT_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(color = rgb(V8/255,V9/255,V10/255),
+         Class = 'Not_Blue_Tarp')
+Data_078_Tarp <- read.csv("HoldOutData/orthovnir078_ROI_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(color = rgb(V8/255,V9/255,V10/255),
+         Class = 'Blue_Tarp')
+Data_078_NonTarp <- read.csv("HoldOutData/orthovnir078_ROI_NON_Blue_Tarps.txt", 
+                            header = FALSE, skip = 8, sep = "") %>%
+  mutate(color = rgb(V8/255,V9/255,V10/255),
+         Class = 'Not_Blue_Tarp')
+```
+
+```{r}
+holdout_df <- rbind(Data_067_Tarp2, Data_069_Tarp, Data_078_Tarp, Data_057_NonTarp, Data_067_NonTarp,Data_069_NonTarp, Data_078_NonTarp)
+holdout_df$Class <- as.factor(holdout_df$Class)
+```
+#### Exploratory Data Analysis
+```{r}
+train_data %>%
+  pivot_longer(cols = -c(Class, Blue_Tarp), names_to = "Feature", values_to = "Value") %>%
+  mutate(Feature = factor(Feature, levels = c("Red", "Green", "Blue"))) %>% 
+  ggplot(aes(x = Value, fill = Class)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~ Feature, scales = "free") +
+  scale_fill_manual(values = c("Blue Tarp" = "blue", "Rooftop" = "grey", "Soil" = "brown", "Various Non-Tarp" = "orange", "Vegetation" = "green")) +  # Custom colors
+  theme_minimal() +
+  labs(title = "Density Plots of Features by Class (Training Dataset)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+train_data %>%
+  pivot_longer(cols = -c(Class, Blue_Tarp), names_to = "Feature", values_to = "Value") %>%
+  mutate(Feature = factor(Feature, levels = c("Red", "Green", "Blue"))) %>% 
+  ggplot(aes(x = Value, fill = Blue_Tarp)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ Feature, scales = "free") +
+  scale_fill_manual(values = c("Yes" = "blue", "No" = "black")) +
+  theme_minimal() +
+  labs(title = "Density Plots of Features by Blue Tarp (Training Dataset)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+# Create a 3D scatter plot
+plot_ly(data = train_data, 
+        x = ~Red, 
+        y = ~Green, 
+        z = ~Blue, 
+        color = ~Blue_Tarp, 
+        colors = c("No" = "black", "Yes" = "blue"),
+        type = "scatter3d",
+        marker = list(size = 2, opacity = 0.25)) %>%
+  layout(
+    title = "3D Scatter Plot of RGB Values by Blue Tarp (Training Dataset)",
+    scene = list(
+      xaxis = list(title = "Red"),
+      yaxis = list(title = "Green"),
+      zaxis = list(title = "Blue")
+    ),
+    annotations = list(
+      list(
+        x = 0.5, y = -0.15,  
+        text = "Note: Training dataset.",
+        showarrow = FALSE, 
+        xref = "paper", yref = "paper", 
+        font = list(size = 12, color = "black")
+      )
+    )
+  )
+
+```
+
+## Verifying which columns corresponding to which color
+
+```{r}
+ggplot(holdout_df, aes(x = V2, y = V3, color = color)) +
+  geom_point(size = .1) +
+  scale_color_identity(guide = 'none') +
+  labs(title = "Color-coded Scatter Plot") +
+  theme_minimal()
+```
+
+### Training Set Analysis
+
+## Load/Prep data
+```{r}
+#| message: false
+train_data_analysis <- read.csv('https://gedeck.github.io/DS-6030/project/HaitiPixels.csv', header = TRUE)
+
+train_data_analysis <- train_data_analysis %>%
+  mutate(Class = as.factor(Class))
+
+form <- formula(glm(Class~., train_data_analysis, family = 'binomial')) #Just to get formula
+```
+
+## Kfold Cross Validation & Workflows
+```{r}
+set.seed(1)
+
+wf <- function(model){
+  folds <- vfold_cv(train_data_analysis, strata = Class)
+  
+  model_wf <- workflow() %>%
+    add_model(model) %>%
+    add_formula(form)
+  
+  model_fit_cv <- model_wf %>%
+    fit_resamples(folds,control=control_resamples(save_pred=TRUE))
+  
+  return(model_fit_cv)
+}
+```
+
+## Train Models
+#### 10 Fold Cross Validation of Logistic Regression
+```{r}
+logreg_model <- multinom_reg(mode = 'classification') %>%
+    set_engine("nnet")
+
+logreg_fit_cv <- wf(logreg_model)
+
+cv_metrics <- collect_metrics(logreg_fit_cv)
+cv_metrics
+```
+
+#### 10 Fold Cross Validation of Linear Discriminant Analysis
+```{r}
+lda_model <- discrim_linear(mode="classification", engine="MASS")
+
+lda_fit_cv <- wf(lda_model)
+
+cv_metrics <- collect_metrics(lda_fit_cv)
+cv_metrics
+```
+
+#### 10 Fold Cross Validation of Linear Discriminant Analysis
+```{r}
+qda_model <- discrim_quad(mode="classification", engine="MASS")
+
+qda_fit_cv <- wf(qda_model)
+
+cv_metrics <- collect_metrics(qda_fit_cv)
+cv_metrics
+```
+
+Code that allows us to show all cross validation stats in one table for easier comparison.
+
+```{r}
+
+cv_metrics <- bind_rows(
+    collect_metrics(logreg_fit_cv) %>%
+        mutate(model="Logistic regression"),
+    collect_metrics(lda_fit_cv) %>%
+        mutate(model="LDA"),
+    collect_metrics(qda_fit_cv) %>%
+        mutate(model="QDA")
+)
+
+#glimpse(cv_metrics)
+
+cv_metrics %>%
+    dplyr::select(model, .metric, mean) %>%
+    tidyr::pivot_wider(names_from = .metric, values_from = mean) %>%
+    knitr::kable(caption = "Cross-validation performance metrics", digits = 3)
+
+```
+
+## Transform Data for code to work later on
+
+```{r}
+holdout_df <- holdout_df %>% dplyr::select(c(V8,V9,V10,Class))
+colnames(holdout_df) <- c('Red','Green','Blue','Class')
+
+holdout_df$Blue_Tarp <- ifelse(holdout_df$Class == "Blue_Tarp", "Yes", "No")
+holdout_df$Blue_Tarp <- factor(holdout_df$Blue_Tarp, levels = c("No", "Yes"))
+holdout_df$Class <- factor(holdout_df$Class)
+```
+
+## Comparing the disribution of rgb values between the training and holdout sets
+```{r}
+# Reshape the data from wide to long format for easier plotting
+data_long <- pivot_longer(train_data, cols = c(Blue, Green, Red), names_to = "Color", values_to = "Value")
+
+# Reorder the levels of Color to Red, Green, Blue
+data_long <- data_long %>%
+  mutate(Color = factor(Color, levels = c("Red", "Green", "Blue")))
+
+# Create box plots using ggplot2
+boxplot1 <- ggplot(data_long, aes(x = Blue_Tarp, y = Value, fill = Color)) +
+  geom_boxplot() +
+  labs(title = "Training Data: Box Plots of Red, Green, and Blue by Blue Tarp",
+       x = "Class",
+       y = "Value",
+       fill = "Color") +
+  ylim(0, 255) +
+  scale_fill_manual(values = c("Red" = "red", "Green" = "green", "Blue" = "blue")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+boxplot1
+
+data_long <- pivot_longer(holdout_df, cols = c(Blue, Green, Red), names_to = "Color", values_to = "Value")
+
+# Reorder the levels of Color to Red, Green, Blue
+data_long <- data_long %>%
+  mutate(Color = factor(Color, levels = c("Red", "Green", "Blue")))
+
+
+boxplot2 <- ggplot(data_long, aes(x = Blue_Tarp, y = Value, fill = Color)) +
+  geom_boxplot() +
+  labs(title = "Holdout Data: Red, Green, and Blue by Class",
+       x = "Class",
+       y = "Value",
+       fill = "Color") +
+  ylim(0, 255) +
+  scale_fill_manual(values = c("Red" = "red", "Green" = "green", "Blue" = "blue")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+boxplot1 / boxplot2
+
+
+```
+
+```{r}
+
+# Take a random sample of 1000 points (adjust as needed)
+sampled_data <- holdout_df %>% sample_n(100000)
+
+# Create a 3D scatter plot with the sampled data
+plot_ly(data = sampled_data, 
+        x = ~Red, 
+        y = ~Green, 
+        z = ~Blue, 
+        color = ~Blue_Tarp, 
+        colors = c("No" = "black", "Yes" = "blue"),
+        type = "scatter3d",
+        marker = list(size = 2, opacity = 0.25)) %>%
+  layout(
+    title = "3D Scatter Plot of RGB Values by Blue Tarp (Holdout Dataset - Random Sample)",  # Updated title
+    scene = list(
+      xaxis = list(title = "Red"),
+      yaxis = list(title = "Green"),
+      zaxis = list(title = "Blue")
+    ),
+    annotations = list(
+      list(
+        x = 0.5, y = -0.15,  
+        text = "Note: Random sample from holdout dataset.",
+        showarrow = FALSE, 
+        xref = "paper", yref = "paper", 
+        font = list(size = 12, color = "black")
+      )
+    ),
+    legend = list(
+      itemsizing = "constant",  # Ensures the symbol size is independent of font size
+      font = list(size = 12),   # Keep font size normal
+      tracegroupgap = 10
+    )
+  ) %>%
+  style(marker = list(size = 2, opacity = .25), traces = c(1, 2))  # Increase legend marker size
+
+```
+
+#### Results 
+
+```{r}
+library(MASS)
+
+# Train QDA model with regularization (tol parameter)
+qda_fit <- qda(Blue_Tarp ~ Red + Green + Blue, data = train_data, tol = 1e-4)
+
+# Create a grid of values over the feature space
+x_range <- seq(min(train_data$Red), max(train_data$Red), length.out = 50)
+y_range <- seq(min(train_data$Green), max(train_data$Green), length.out = 50)
+z_range <- seq(min(train_data$Blue), max(train_data$Blue), length.out = 50)
+
+grid <- expand.grid(Red = x_range, Green = y_range, Blue = z_range)
+
+# Predict class probabilities for the grid points
+qda_pred <- predict(qda_fit, newdata = grid)
+grid$Blue_Tarp_Prob <- qda_pred$posterior[, "Yes"]
+
+# Filter points close to decision threshold (e.g., 0.5)
+boundary_points <- grid[abs(grid$Blue_Tarp_Prob - 0.7) < 0.05, ]
+
+# 3D scatter plot of training data with decision boundary
+# 3D scatter plot of training data with decision boundary
+plot_ly() %>%
+  add_trace(data = train_data %>% filter(Blue_Tarp == "Yes"), 
+            x = ~Red, y = ~Green, z = ~Blue, 
+            type = "scatter3d", mode = "markers", 
+            marker = list(size = 2, opacity = 0.25, color = "blue"),
+            name = "Blue Tarp") %>% 
+  add_trace(data = train_data %>% filter(Blue_Tarp == "No"), 
+            x = ~Red, y = ~Green, z = ~Blue, 
+            type = "scatter3d", mode = "markers", 
+            marker = list(size = 2, opacity = 0.25, color = "black"),
+            name = "Not Blue Tarp") %>%  # Label for "Not Blue Tarp"
+  add_trace(data = boundary_points, 
+            x = ~Red, y = ~Green, z = ~Blue, 
+            type = "scatter3d", mode = "markers",
+            marker = list(size = 2, color = "orange", opacity = 0.25),
+            name = "Decision Boundary") %>%  # Label for decision boundary
+  layout(title = "3D Decision Boundary for QDA (Training Dataset)",
+         scene = list(xaxis = list(title = "Red"),
+                      yaxis = list(title = "Green"),
+                      zaxis = list(title = "Blue")),
+         legend = list(
+           itemsizing = "constant",  # Ensures legend symbol size is independent of font
+           font = list(size = 10),   # Keep font size normal
+           tracegroupgap = 5
+         ))
+```
+
+
+```{r}
+folds <- createFolds(train_data$Class, k = 10, list = TRUE, returnTrain = TRUE)
+
+control <- trainControl(method = "cv",
+                        number = 10,
+                        index = folds,
+                        savePredictions = TRUE,
+                        classProbs = TRUE)
+```
+
+## Load/Prep data
+```{r}
+set.seed(123)
+#| message: false
+train_data <- read.csv('https://gedeck.github.io/DS-6030/project/HaitiPixels.csv', sep = ",", header = TRUE)
+train_data$Class <- ifelse(train_data$Class == "Blue Tarp", "Blue_Tarp", "Not_Blue_Tarp")
+train_data$Class <- factor(train_data$Class)
+train_data$Blue_Tarp <- ifelse(train_data$Class == "Blue_Tarp", "Yes", "No")
+train_data$Blue_Tarp <- factor(train_data$Blue_Tarp, levels = c("No", "Yes"))
+
+folds <- createFolds(train_data$Class, k = 10, list = TRUE, returnTrain = TRUE)
+
+control <- trainControl(method = "cv",
+                        number = 10,
+                        index = folds,
+                        savePredictions = TRUE,
+                        classProbs = TRUE)
+```
+
+```{r}
+metric_results <- function(model, Previous_Stats) {
+  
+  cluster <- makePSOCKcluster(2) 
+  registerDoParallel(cluster)
+  
+  set.seed(123)
+  prob <- predict(model, newdata = holdout_df, type = "prob")
+  pred <- as.factor(ifelse(prob$Blue_Tarp>Previous_Stats$prob_threshold, "Blue_Tarp", "Not_Blue_Tarp"))
+
+  rate <- prediction(prob[,2], holdout_df$Class)
+  auc <- performance(rate, "auc")
+  
+  stopCluster(cluster)
+  
+  conf <- confusionMatrix(pred, holdout_df$Class)
+  
+  Tuning <- NaN
+  Sigma_Lambda <- NaN
+  
+  cols <- colnames(Previous_Stats)
+  
+  for (col in c("alpha","k","mtry","C")) {
+    if(col %in% cols){
+      Tuning <- Previous_Stats[[col]]
+    }
+  }
+  
+  for (col in c("lambda","sigma")) {
+    if(col %in% cols){
+      Sigma_Lambda <- Previous_Stats[[col]]
+    }
+  }
+  
+  stats <- data.frame(Tuning = Tuning,
+                      Sigma_Lambda = Sigma_Lambda,
+                      AUROC = auc@y.values[[1]],
+                      Threshold = Previous_Stats$prob_threshold,
+                      Accuracy = conf$overall[["Accuracy"]],
+                      TPR = conf$byClass[["Sensitivity"]],
+                      FPR = 1-conf$byClass[["Specificity"]],
+                      Precision = conf$byClass[["Precision"]])
+  return(stats)
+}
+```
+
+#Creating a threshold function
+```{r}
+thresholds <- seq(0.1, 0.9, by = 0.1)
+
+stats_threshold <- c("Accuracy", "Kappa", "Sensitivity", "Specificity", "Precision")
+
+testing_thres <- function(model) {
+  library(caret)
+  results <- thresholder(model, 
+                         threshold = thresholds, 
+                         statistics = stats_threshold)
+
+  results$falseNeg <- 1 - results$Sensitivity
+  results$falsePos <- 1 - results$Specificity
+  
+  return(results)
+}
+```
+
+#Creating a ROC plot function
+```{r}
+roc_plot <- function(model, model_stats, model_name, seed = 123) {
+  set.seed(seed)
+  
+  prob <- model$pred[order(model$pred$rowIndex),]
+  
+  rates <- prediction(prob$Not_Blue_Tarp,as.numeric(train_data$Class))
+  roc <- performance(rates, measure = "tpr", x.measure = "fpr")
+  plot(roc, main = paste("ROC Curve:", model_name))
+  lines(x = c(0,1), y = c(0,1), col = "purple")
+  
+  auc <- performance(rates, "auc")
+  model_stats$AUROC <- auc@y.values[[1]]
+  return(model_stats)
+}
+
+```
+
+```{r}
+colnames(train_data) <- c('Class','Red','Green','Blue','Blue Tarp')
+colnames(holdout_df) <- c('Red','Green','Blue','Class')
+
+holdout_df$Blue_Tarp <- ifelse(holdout_df$Class == "Blue_Tarp", "Yes", "No")
+holdout_df$Blue_Tarp <- factor(holdout_df$Blue_Tarp, levels = c("No", "Yes"))
+holdout_df$Class <- factor(holdout_df$Class)
+```
+
+
+#Logistic Regression
+```{r}
+#| message: false
+logreg<-train(Class ~ Red + Green + Blue,
+      data = train_data,
+      family = "binomial",
+      method = "glm",
+      trControl = control)
+```
+
+#Threshold Testing Logistic Regression
+```{r}
+logreg_thres <- testing_thres(logreg)
+logreg_thres[2:9] %>% slice_max(Accuracy)
+```
+
+```{r}
+logreg_final <- logreg_thres[2:9] %>% slice_max(Accuracy)
+logreg_final <- roc_plot(logreg, logreg_final, "Logistic Regression")
+```
+
+#Linear Discriminant Analysis
+```{r}
+lda <- train(Class ~ Red + Green + Blue, data = train_data,
+                  method = "lda",
+                  trControl = control)
+```
+#Threshold Testing Linear Discriminant Analysis
+```{r}
+lda_thres <- testing_thres(lda)
+lda_thres[2:9] %>% slice_max(Accuracy)
+```
+
+#Optimal Threshold based on Precision Linear Discriminant Analysis
+
+```{r}
+precision <- "Precision"
+
+optimal_threshold <- lda_thres %>% 
+  filter_at(vars(contains(precision)), all_vars(!is.na(.))) %>% 
+  slice(which.max(get(precision))) %>% 
+  pull(prob_threshold)
+```
+
+
+```{r}
+lda_thres$prob_threshold <- optimal_threshold
+```
+
+```{r}
+lda_final <- lda_thres[2:9] %>% slice_max(Accuracy)
+lda_final <- roc_plot(lda, lda_final, "LDA")
+```
+
+#Quadratic Discriminant Analyis
+```{r}
+qda <- train(Class ~ Red+Green+Blue, data=train_data,
+                  method="qda",
+                  trControl=control)
+```
+#Threshold Testing Quadratic Discriminant Analyis
+```{r}
+qda_thres <- testing_thres(qda)
+qda_thres[2:9] %>% slice_max(Accuracy)
+```
+
+```{r}
+qda_final <- qda_thres[2:9] %>% slice_max(Accuracy)
+qda_final <- roc_plot(qda, qda_final, "QDA")
+```
+
+```{r}
+LogReg <- metric_results(logreg, logreg_final)
+LDA <- metric_results(lda, lda_final)
+QDA <- metric_results(qda, qda_final)
+```
+
+```{r}
+LogReg <- LogReg %>% mutate(Model="Log Reg")
+LDA <- LDA %>% mutate(Model="LDA")
+QDA <- QDA %>% mutate(Model="QDA")
+
+table_data_final <- Reduce(function(x, y) merge(x, y, all=TRUE),
+                     list(LogReg,
+                          LDA,
+                          QDA))
+
+Table_Stats_Final <- table_data_final %>%
+  dplyr::select("Model", "Tuning", "Sigma_Lambda", 
+                "AUROC", "Threshold", 
+                "Accuracy", "TPR", "FPR", 
+                "Precision") %>%
+  column_to_rownames(var = 'Model') %>%
+  round(4)
+
+Table_Stats_Final$Tuning[Table_Stats_Final$Tuning == 0] <- "*"
+
+kable(Table_Stats_Final, format = "html", caption = "Hold Out Results") %>%
+  kable_styling(full_width = F, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(1, bold = T, border_right = T)
+```
+
+#ROC comparison
+```{r}
+library(pROC)
+
+metric_roc <- function(model, Previous_Stats) {
+  cluster <- makePSOCKcluster(2) 
+  registerDoParallel(cluster)
+  
+  set.seed(123)
+  
+  prob <- predict(model, newdata = holdout_df, type = "prob")
+  pred <- as.factor(ifelse(prob$Blue_Tarp>Previous_Stats$prob_threshold, "Blue_Tarp", "Not_Blue_Tarp"))
+
+  rate <- prediction(prob[,2], holdout_df$Class)
+  auc <- performance(rate, "auc")
+
+  conf <- confusionMatrix(pred, holdout_df$Class)
+  
+  roc_curve <- roc(holdout_df$Class, prob$Blue_Tarp)
+  
+  stopCluster(cluster)
+  
+  conf <- confusionMatrix(pred, holdout_df$Class)
+  
+  Tuning <- NaN
+  Sigma_Lambda <- NaN
+  
+  cols <- colnames(Previous_Stats)
+  
+  for (col in c("alpha", "k", "mtry", "C")) {
+    if (col %in% cols) {
+      Tuning <- Previous_Stats[[col]]
+    }
+  }
+  
+  for (col in c("lambda", "sigma")) {
+    if (col %in% cols) {
+      Sigma_Lambda <- Previous_Stats[[col]]
+    }
+  }
+  
+  stats <- data.frame(
+    Tuning = Tuning,
+    Sigma_Lambda = Sigma_Lambda,
+    AUROC = auc@y.values[[1]],
+    Threshold = Previous_Stats$prob_threshold,
+    Accuracy = conf$overall[["Accuracy"]],
+    TPR = conf$byClass[["Sensitivity"]],
+    FPR = 1 - conf$byClass[["Specificity"]],
+    Precision = conf$byClass[["Precision"]]
+  )
+  
+  return(list(stats = stats, roc_curve = roc_curve))
+}
+
+LogReg_result <- metric_roc(logreg, logreg_final)
+LDA_result <- metric_roc(lda, lda_final)
+QDA_result <- metric_roc(qda, qda_final)
+
+roc_plot <- ggplot() +
+  geom_line(aes(x = 1 - LogReg_result$roc_curve$specificities, 
+                y = LogReg_result$roc_curve$sensitivities), color = "blue") +
+  geom_line(aes(x = 1 - LDA_result$roc_curve$specificities, 
+                y = LDA_result$roc_curve$sensitivities), color = "red") +
+  geom_line(aes(x = 1 - QDA_result$roc_curve$specificities, 
+                y = QDA_result$roc_curve$sensitivities), color = "green") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  labs(x = "1 - Specificity", y = "Sensitivity", 
+       title = "ROC Curve Comparison") 
+
+LogReg_AUROC <- LogReg_result$roc_curve$auc
+LDA_AUROC <- LDA_result$roc_curve$auc
+QDA_AUROC <- QDA_result$roc_curve$auc
+
+
+roc_plot + 
+  annotate("text", x = 0.7, y = 0.3, label = paste("LogReg AUROC:", round(LogReg_AUROC, 4)), color = "blue", size = 5) +
+  annotate("text", x = 0.7, y = 0.2, label = paste("LDA AUROC:", round(LDA_AUROC, 4)), color = "red", size = 5) +
+  annotate("text", x = 0.7, y = 0.1, label = paste("QDA AUROC:", round(QDA_AUROC, 4)), color = "green", size = 5)
+```
+
